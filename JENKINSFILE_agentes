@@ -1,78 +1,175 @@
 pipeline {
-    agent any
+    agent none
 
-    options { skipDefaultCheckout() }
+    stages {
 
-     stages {
-        stage('Get Code') {
+        stage('Checkout') {
+            agent { label 'windows' }
             steps {
                 // Obtener código del repo
-                git 'https://github.com/anieto-unir/helloworld.git'
-	            echo WORKSPACE
-                bat 'dir'
-                stash name:'code', includes:'**'
+                git 'https://github.com/anieto-unir/res-helloworld.git'
+
+                bat '''
+                    whoami
+                    hostname
+                    echo %WORKSPACE%
+                '''
+
+                stash name: 'src', includes: '**/*'
             }
         }
-    
-        stage('Build') {
-           steps {
-              echo 'Eyyy, esto es Python. No hay que compilar nada!!!'
-           }
-        }
-        
-        stage('Tests')
-        {
-            parallel
-            {
+
+        stage('Tests Paralelos') {
+            parallel {
+
                 stage('Unit') {
-                    agent {label 'agent1'}
+                    agent { label 'python' }
                     steps {
-                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            unstash name:'code'
+                        catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                            unstash 'src'
+
                             sh '''
-                                ls -la
-                                export PYTHONPATH=${WORKSPACE}
-                                /home/agent1/.local/bin/pytest --junitxml=result-unit.xml test/unit
+                                whoami
+                                hostname
+                                echo "$WORKSPACE"
+
+                                export PYTHONPATH=.
+                                python -m coverage run --branch --source=app \
+                                  --omit=app/__init__.py,app/api.py \
+                                  -m pytest --junitxml=result-unit.xml test/unit
+                                python -m coverage xml
                             '''
-                            stash name:'unit-res', includes:'result-unit.xml'
-                       }
+
+                            junit 'result-unit.xml'
+                            stash name: 'coverage-data', includes: '.coverage'
+                            archiveArtifacts 'coverage.xml'
+                        }
                     }
-                }   
-                
-                
-                stage('Rest') {
-                    agent {label 'agent2'}
+                }
+
+                stage('Static') {
+                    agent { label 'python' }
                     steps {
-                      catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                        unstash name:'code'
+                        unstash 'src'
+
                         sh '''
-                            export FLASK_APP=app/api.py                          
-                            /home/agent2/.local/bin/flask run &
+                            whoami
+                            hostname
+                            echo "$WORKSPACE"
 
-                            sleep 4
-
-                            java -jar /home/agent2/wiremock/wiremock-standalone-3.3.1.jar --port 9090 --root-dir /home/agent2/wiremock &
-                            export PYTHONPATH=${WORKSPACE}
-                            
-                            sleep 15
-                            
-                            /home/agent2/.local/bin/pytest --junitxml=result-rest.xml test/rest
+                            python -m flake8 --exit-zero --format=pylint app > flake8.out
                         '''
-                      }
-                      stash name:'rest-res', includes:'result-rest.xml'
-                    }    
-                }                
-                
+
+                        recordIssues(
+                                tools: [flake8(pattern: 'flake8.out')],
+                                qualityGates: [
+                                        [threshold: 8, type: 'TOTAL', unstable: true],
+                                        [threshold: 10, type: 'TOTAL', failure: true]
+                                ]
+                        )
+                    }
+                }
+
+                stage('Security') {
+                    agent { label 'python' }
+                    steps {
+                        unstash 'src'
+
+                        sh '''
+                            whoami
+                            hostname
+                            echo "$WORKSPACE"
+
+                            python -m bandit --exit-zero -r . -f custom -o bandit.out --msg-template "{abspath}:{line}: [{severity}] [{test_id}] {msg}"
+                        '''
+
+                        recordIssues(
+                                tools: [pyLint(pattern: 'bandit.out')],
+                                qualityGates: [
+                                        [threshold: 2, type: 'TOTAL', unstable: true],
+                                        [threshold: 4, type: 'TOTAL', unstable: false]
+                                ]
+                        )
+                    }
+                }
             }
         }
 
-        stage('Results') {
+        stage('Rest') {
+            agent { label 'windows' }
             steps {
-                unstash name:'unit-res'
-                unstash name:'rest-res'
-                junit 'result*.xml' 
+                unstash 'src'
+
+                bat '''
+                    whoami
+                    hostname
+                    echo %WORKSPACE%
+
+                    set PYTHONPATH=.
+                    set FLASK_APP=app\\api.py
+
+                    start /B python -m flask run --port=5000
+                    curl -L -o wiremock.jar https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/3.3.1/wiremock-standalone-3.3.1.jar
+                    start /B java -jar wiremock.jar --port 9090 --root-dir test\\wiremock
+                    ping -n 10 127.0.0.1 > nul
+                    python -m pytest --junitxml=result-rest.xml test\\rest
+                '''
+
+                junit 'result-rest.xml'
             }
         }
-     
+
+        stage('Coverage') {
+            agent { label 'python' }
+            steps {
+                unstash 'coverage-data'
+
+                sh '''
+                    whoami
+                    hostname
+                    echo "$WORKSPACE"
+
+                    python -m coverage xml
+                '''
+
+                recordCoverage(
+                        tools: [[parser: 'COBERTURA', pattern: 'coverage.xml']],
+                        qualityGates: [
+                                [criticality: 'FAILURE', metric: 'LINE', threshold: 85],
+                                [criticality: 'UNSTABLE', metric: 'LINE', threshold: 95],
+                                [criticality: 'FAILURE', metric: 'BRANCH', threshold: 80],
+                                [criticality: 'UNSTABLE', metric: 'BRANCH', threshold: 90]
+                        ]
+                )
+            }
+        }
+
+        stage('Performance') {
+            agent { label 'windows' }
+            steps {
+                unstash 'src'
+
+                bat '''
+                    whoami
+                    hostname
+                    echo %WORKSPACE%
+
+                    set FLASK_APP=app\\api.py
+                    start /B python -m flask run --port=5000
+                    ping -n 5 127.0.0.1 > nul
+                    C:\\WireMock\\jmeter\\bin\\jmeter -n -t test\\jmeter\\flask.jmx -l flask.jtl
+                '''
+
+                perfReport sourceDataFiles: 'flask.jtl'
+            }
+        }
+    }
+
+    post {
+        always {
+            node('windows') {
+                cleanWs(deleteDirs: true, notFailBuild: true)
+            }
+        }
     }
 }
