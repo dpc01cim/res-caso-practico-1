@@ -6,8 +6,8 @@ pipeline {
         stage('Checkout') {
             agent { label 'windows' }
             steps {
-                // Obtener código del repo
-                git 'https://github.com/anieto-unir/res-helloworld.git'
+                // Obtener código del repo en la rama feature_fix_coverage
+                git branch: 'feature_fix_coverage', url: 'https://github.com/dpc01cim/res-caso-practico-1.git'
 
                 bat '''
                     whoami
@@ -172,4 +172,4 @@ pipeline {
             }
         }
     }
-} 
+}
